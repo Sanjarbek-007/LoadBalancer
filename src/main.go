@@ -1,8 +1,10 @@
 package main
 
 import (
+	"balancer/logger"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -26,7 +28,6 @@ type ProxyServer struct {
 	mu        sync.Mutex
 }
 
-
 func newProxyServer(addr string, checkFreq time.Duration) *ProxyServer {
 	serverUrl, err := url.Parse(addr)
 	if err != nil {
@@ -42,39 +43,36 @@ func newProxyServer(addr string, checkFreq time.Duration) *ProxyServer {
 	return server
 }
 
-
 func (s *ProxyServer) monitorHealth() {
 	for {
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		s.alive = s.IsAlive()
+		s.mu.Unlock()
 		time.Sleep(s.checkFreq)
 	}
 }
 
-
 func (s *ProxyServer) Address() string { return s.Addr }
-
 
 func (s *ProxyServer) IsAlive() bool {
 	fmt.Printf("Checking server: %s\n", s.Addr)
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 	}
-	resp, err := client.Get(s.Addr)
+	resp, err := client.Get(s.Addr + "/health")
 	if err != nil || resp.StatusCode >= 400 {
 		fmt.Printf("Server %s is down\n", s.Addr)
+		logger.NewLogger().Info("Server %s is down\n", s.Addr, "Info")
 		return false
 	}
 	fmt.Printf("Server %s is up\n", s.Addr)
+	logger.NewLogger().Info("Server %s is up\n", s.Addr, "Info")
 	return true
 }
-
 
 func (s *ProxyServer) Serve(rw http.ResponseWriter, req *http.Request) {
 	s.Proxy.ServeHTTP(rw, req)
 }
-
 
 type LoadBalancer struct {
 	Port            string
@@ -82,7 +80,6 @@ type LoadBalancer struct {
 	Servers         []Server
 	mu              sync.Mutex
 }
-
 
 func NewLoadBalancer(port string, servers []Server) *LoadBalancer {
 	return &LoadBalancer{
@@ -92,10 +89,10 @@ func NewLoadBalancer(port string, servers []Server) *LoadBalancer {
 	}
 }
 
-
 func handleErr(err error) {
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
+		logger.NewLogger().Error("error:", slog.String("key", err.Error()))
 		os.Exit(1)
 	}
 }
@@ -115,19 +112,18 @@ func (lb *LoadBalancer) GetNextAvailableServer() Server {
 	return server
 }
 
-
 func (lb *LoadBalancer) ServeProxy(rw http.ResponseWriter, req *http.Request) {
 	TargetServer := lb.GetNextAvailableServer()
 	fmt.Printf("Forwarding request to address: %s\n", TargetServer.Address())
-
+	logger.NewLogger().Info("Forwarding request to address: %s\n", TargetServer.Address(), "Good")
 
 	respRec := httptest.NewRecorder()
 	TargetServer.Serve(respRec, req)
 
-
 	resp := respRec.Result()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		http.Error(rw, "Failed to forward request", http.StatusInternalServerError)
+		logger.NewLogger().Error("Failed to forward request")
 		return
 	}
 
@@ -142,9 +138,8 @@ func (lb *LoadBalancer) ServeProxy(rw http.ResponseWriter, req *http.Request) {
 
 func main() {
 	servers := []Server{
-		newProxyServer("http://3.75.208.130:2345/swagger/index.html", 10*time.Second),
-		newProxyServer("http://3.65.0.245:2345/swagger/index.html", 10*time.Second),
-		newProxyServer("http://3.65.0.245:9876/swagger/index.html", 10*time.Second),
+		newProxyServer("http://3.75.208.130:8081", 10*time.Second),
+		newProxyServer("http://3.120.39.160:8082", 10*time.Second),
 	}
 
 	lb := NewLoadBalancer("8080", servers)
@@ -156,6 +151,7 @@ func main() {
 	http.HandleFunc("/", handleRedirect)
 
 	fmt.Printf("Serving request at 'localhost:%s'\n", lb.Port)
+	logger.NewLogger().Info("Serving request at 'localhost:%s'\n", lb.Port, "OK")
 	err := http.ListenAndServe(":"+lb.Port, nil)
 	handleErr(err)
 }
